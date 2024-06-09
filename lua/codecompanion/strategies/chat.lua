@@ -160,11 +160,18 @@ local function parse_tools(chat)
 
   local response = assistant_response[#assistant_response]
 
+  local tools = {}
+  if not response then
+    response = assistant_response[#assistant_response - 1]
+  end
+  if not response then
+    response = "\n"
+  end
+
   local parser = vim.treesitter.get_string_parser(response, "markdown")
   local tree = parser:parse()[1]
   local query = vim.treesitter.query.parse("markdown", tool_query)
 
-  local tools = {}
   for id, node in query:iter_captures(tree:root(), response, 0, -1) do
     local name = query.captures[id]
     if name == "tools" then
