@@ -2,13 +2,6 @@ local log = require("codecompanion.utils.log")
 local xml2lua = require("codecompanion.utils.xml.xml2lua")
 
 ---@class CodeCompanion.Tool
----@field cmds table
----@field schema table
----@field prompt fun(schema: string): string
----@field env fun(xml: table): table|nil
----@field pre_cmd fun(env: table, xml: table): table|nil
----@field output_error_prompt fun(error: table): string
----@field output_prompt fun(output: table): string
 return {
   cmds = {
     { "docker", "pull", "${lang}" },
@@ -32,11 +25,15 @@ return {
       },
     },
   },
-  prompt = function(schema)
-    return "You are an expert in writing and reviewing code. To aid you further, I'm giving you access to be able to execute code in a remote environment. This enables you to write code, trigger its execution and immediately see the output from your efforts. Of course, not every question I ask may need code to be executed so bear that in mind.\n\nTo execute code, you need to return a markdown code block which follows the below schema:"
+  system_prompt = function(schema)
+    return "I'm giving you access to the **Code Runner** tool which enables you to run any code that you've created. You can write code and using the tool, trigger its execution and immediately see the output. This is useful to see if the code worked as you intended. Of course, not every question I ask you will need the tool so bear that in mind.\n\nTo use the tool, you need to return an XML markdown code block (with backticks) which follows the below schema:"
       .. "\n\n```xml\n"
       .. xml2lua.toXml(schema, "tool")
-      .. "\n```\n"
+      .. "\n```\n\n"
+      .. "You can see that the schema has input parameters where you can specify the language (e.g. Python) and the code you'd like to run.\n\n"
+      .. "NOTE: The tool will only parse the last schema that you respond with.\n\n"
+      .. "NOTE: If you don't conform to the schema, EXACTLY, then the tool will not run.\n\n"
+      .. "NOTE: Please respond concisely so I can understand and observe the code you're executing with the tool."
   end,
   env = function(xml)
     local temp_input = vim.fn.tempname()

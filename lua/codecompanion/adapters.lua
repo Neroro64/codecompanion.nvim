@@ -1,3 +1,5 @@
+local config = require("codecompanion").config
+
 local log = require("codecompanion.utils.log")
 local utils = require("codecompanion.utils.util")
 
@@ -7,6 +9,8 @@ local Adapter = {}
 
 ---@class CodeCompanion.AdapterArgs
 ---@field name string The name of the adapter
+---@field roles table The mapping of roles in the config to the LLM's defined roles
+---@field features table The features that the adapter supports
 ---@field url string The URL of the generative AI service to connect to
 ---@field env? table Environment variables which can be referenced in the parameters
 ---@field headers table The headers to pass to the request
@@ -15,11 +19,12 @@ local Adapter = {}
 ---@field raw? table Any additional curl arguments to pass to the request
 ---@field opts? table Additional options for the adapter
 ---@field callbacks table Functions which link the output from the request to CodeCompanion
----@field callbacks.form_parameters fun()
----@field callbacks.form_messages fun()
----@field callbacks.is_complete fun()
----@field callbacks.chat_output fun()
----@field callbacks.inline_output fun()
+---@field callbacks.form_parameters fun(params: table, messages: table): table
+---@field callbacks.form_messages fun(messages: table): table
+---@field callbacks.is_complete fun(data: table): boolean
+---@field callbacks.tokens? fun(data: table): number|nil
+---@field callbacks.chat_output fun(data: table): table|nil
+---@field callbacks.inline_output fun(data: table, context: table): table|nil
 ---@field schema table Set of parameters for the generative AI service that the user can customise in the chat buffer
 
 ---@param args CodeCompanion.AdapterArgs
@@ -28,6 +33,9 @@ function Adapter.new(args)
   return setmetatable({ args = args }, { __index = Adapter })
 end
 
+---TODO: Refactor this to return self so we can chain it
+
+---Get the default settings from the schema
 ---@return table
 function Adapter:get_default_settings()
   local settings = {}
@@ -41,6 +49,7 @@ function Adapter:get_default_settings()
   return settings
 end
 
+---Set parameters based on the schema table's mappings
 ---@param settings? table
 ---@return CodeCompanion.Adapter
 function Adapter:set_params(settings)
@@ -80,6 +89,7 @@ function Adapter:set_params(settings)
   return self
 end
 
+---Replace any variables in the header with env vars or cmd outputs
 ---@return CodeCompanion.Adapter
 function Adapter:replace_header_vars()
   if self.args.headers then
@@ -127,6 +137,46 @@ function Adapter:replace_header_vars()
   end
 
   return self
+end
+
+---Replace roles in the messages with the adapter's defined roles
+---@param messages table
+---@return table
+function Adapter:map_roles(messages)
+  local roles = config.strategies.chat.roles
+  local map = {
+    [roles.llm:lower()] = self.args.roles.llm,
+    [roles.user:lower()] = self.args.roles.user,
+  }
+
+  for _, message in ipairs(messages) do
+    if message.role then
+      message.role = message.role:lower()
+      -- Pass through the role if it doesn't exist in the map
+      message.role = map[message.role] or message.role
+    end
+  end
+
+  return messages
+end
+
+---@param adapter table|string|function
+---@param opts? table
+---@return CodeCompanion.Adapter
+function Adapter.use(adapter, opts)
+  local adapter_config
+
+  if type(adapter) == "string" then
+    adapter_config = require("codecompanion.adapters." .. adapter)
+  elseif type(adapter) == "function" then
+    adapter_config = adapter()
+  else
+    adapter_config = adapter
+  end
+
+  adapter_config = vim.tbl_deep_extend("force", {}, vim.deepcopy(adapter_config), opts or {})
+
+  return Adapter.new(adapter_config)
 end
 
 return Adapter

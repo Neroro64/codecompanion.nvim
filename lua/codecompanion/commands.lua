@@ -1,3 +1,5 @@
+local log = require("codecompanion.utils.log")
+
 ---@class CodeCompanionCommandOpts:table
 ---@field desc string
 
@@ -7,6 +9,10 @@
 ---@field opts CodeCompanionCommandOpts
 
 local codecompanion = require("codecompanion")
+
+local clean_up_prompt = function(prompt)
+  return prompt:match("%s(.+)")
+end
 
 ---@type CodeCompanionCommand[]
 return {
@@ -22,11 +28,35 @@ return {
           codecompanion.inline(opts)
         end)
       else
+        if string.sub(opts.args, 1, 1) == "/" then
+          local user_prompt = nil
+          -- Remove the leading slash
+          local slash_cmd = string.sub(opts.args, 2)
+
+          local user_prompt_pos = string.find(slash_cmd, " ")
+
+          if user_prompt_pos then
+            -- Extract the user_prompt first
+            user_prompt = string.sub(slash_cmd, user_prompt_pos + 1)
+            slash_cmd = string.sub(slash_cmd, 1, user_prompt_pos - 1)
+
+            log:trace("Slash cmd: %s", slash_cmd)
+            log:trace("User prompt: %s", user_prompt)
+          end
+
+          if codecompanion.slash_cmds[slash_cmd] then
+            if user_prompt then
+              opts.user_prompt = user_prompt
+            end
+            return codecompanion.run_slash_cmds(slash_cmd, opts)
+          end
+        end
+
         codecompanion.inline(opts)
       end
     end,
     opts = {
-      desc = "Trigger CodeCompanion inline",
+      desc = "Start a custom prompt",
       range = true,
       nargs = "*",
     },

@@ -12,11 +12,46 @@ local function reset_cycle()
   error_content = ""
 end
 
+local function handle_streamed_error(data)
+  log:debug("Couldn't parse JSON: %s", data)
+  log:trace("Error content so far: %s", error_content)
+
+  -- Try and parse the JSON again
+  local ok, json = pcall(vim.json.decode, error_content, { luanil = { object = true } })
+
+  if not ok then
+    if cycles > 10 then
+      return {
+        status = "error",
+        output = string.format("Error malformed json: %s", json),
+      }
+    end
+
+    return {
+      status = "pending",
+      output = nil,
+    }
+  end
+
+  if json.error.message then
+    reset_cycle()
+    return {
+      status = "error",
+      output = "OpenAI Adapter - " .. json.error.message,
+    }
+  end
+end
+
 ---@class CodeCompanion.AdapterArgs
 return {
-  name = "OpenAI",
+  name = "openai",
+  roles = {
+    llm = "assistant",
+    user = "user",
+  },
   features = {
     text = true,
+    tokens = true,
     vision = true,
   },
   url = "http://127.0.0.1:9000/v1/chat/completions",
@@ -33,21 +68,10 @@ return {
   },
   parameters = {
     stream = true,
+    stream_options = {
+      include_usage = true,
+    },
   },
-  chat_prompt = [[
-You are an AI programming assistant. When asked for your name, you must respond with "CodeCompanion". You were built by Oli Morris. Follow the user's requirements carefully & to the letter. Your expertise is strictly limited to software development topics. Avoid content that violates copyrights. For questions not related to software development, simply give a reminder that you are an AI programming assistant. Keep your answers short and impersonal.
-
-You can answer general programming questions and perform the following tasks:
-- Ask a question about the files in your current workspace
-- Explain how the selected code works
-- Generate unit tests for the selected code
-- Propose a fix for the problems in the selected code
-- Scaffold code for a new feature
-- Ask questions about Neovim
-- Ask how to do something in the terminal
-
-First think step-by-step - describe your plan for what to build in pseudocode, written out in great detail. Then output the code in a single code block. Minimize any other prose. Use Markdown formatting in your answers. Make sure to include the programming language name at the start of the Markdown code blocks. Avoid wrapping the whole response in triple backticks. The user works in a text editor called Neovim which has a concept for editors with open files, integrated unit test support, an output pane that shows the output of running the code as well as an integrated terminal. The active document is the source code the user is looking at right now. You can only give one reply for each conversation turn.
-  ]],
   callbacks = {
     ---Set the parameters
     ---@param params table
@@ -75,6 +99,26 @@ First think step-by-step - describe your plan for what to build in pseudocode, w
       return false
     end,
 
+    ---Returns the number of tokens generated from the LLM
+    ---@param data table The data from the LLM
+    ---@return number|nil
+    tokens = function(data)
+      if data and data ~= "" then
+        local data_mod = data:sub(7)
+        local ok, json = pcall(vim.json.decode, data_mod, { luanil = { object = true } })
+
+        if not ok then
+          return
+        end
+
+        if json.usage then
+          local tokens = json.usage.total_tokens
+          log:trace("Tokens: %s", tokens)
+          return tokens
+        end
+      end
+    end,
+
     ---Output the data from the API ready for insertion into the chat buffer
     ---@param data table The streamed JSON data from the API, also formatted by the format_data callback
     ---@return table|nil [status: string, output: table]
@@ -87,40 +131,16 @@ First think step-by-step - describe your plan for what to build in pseudocode, w
 
         if not ok then
           cycle_error(data)
-          log:debug("Couldn't parse JSON: %s", data)
-          log:trace("Error content so far: %s", error_content)
-
-          -- Try and parse the JSON again
-          ok, json = pcall(vim.json.decode, error_content, { luanil = { object = true } })
-
-          if not ok then
-            if cycles > 10 then
-              return {
-                status = "error",
-                output = string.format("Error malformed json: %s", json),
-              }
-            end
-
-            return {
-              status = "pending",
-              output = nil,
-            }
-          end
-
-          if json.error.message then
-            reset_cycle()
-            return {
-              status = "error",
-              output = "OpenAI Adapter - " .. json.error.message,
-            }
-          end
+          return handle_streamed_error(data)
         end
 
-        local delta = json.choices[1].delta
+        if #json.choices > 0 then
+          local delta = json.choices[1].delta
 
-        if delta.content then
-          output.content = delta.content
-          output.role = delta.role or nil
+          if delta.content then
+            output.content = delta.content
+            output.role = delta.role or nil
+          end
         end
 
         -- log:trace("----- For Adapter test creation -----\nOutput: %s\n ---------- // END ----------", output)
@@ -137,14 +157,14 @@ First think step-by-step - describe your plan for what to build in pseudocode, w
     ---Output the data from the API ready for inlining into the current buffer
     ---@param data table The streamed JSON data from the API, also formatted by the format_data callback
     ---@param context table Useful context about the buffer to inline to
-    ---@return string|nil
+    ---@return string|table|nil
     inline_output = function(data, context)
       if data and data ~= "" then
         data = data:sub(7)
         local ok, json = pcall(vim.json.decode, data, { luanil = { object = true } })
 
         if not ok then
-          return
+          return log:error("Error: Please see the log for more information")
         end
 
         --- Some third-party OpenAI forwarding services may have a return package with an empty json.choices.

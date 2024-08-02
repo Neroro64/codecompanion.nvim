@@ -1,41 +1,174 @@
 local config = require("codecompanion").config
-local ts = require("codecompanion.utils.ts")
+
+local ts = require("codecompanion.utils.treesitter")
+
+local api = vim.api
 
 local M = {}
 
-M.save = {
-  desc = "Save the chat buffer and trigger the API",
+---Clear a keymap from a specific buffer
+---@param keys string
+---@param bufnr? integer
+local function clear_map(keys, bufnr)
+  bufnr = bufnr or 0
+  vim.keymap.del("n", keys, { buffer = bufnr })
+end
+
+-- CHAT MAPPINGS --------------------------------------------------------------
+M.helpers = {
+  callback = function()
+    local lines = {}
+    local indent = " "
+    local padding = " "
+
+    local function max(col, tbl)
+      local max_length = 0
+      for key, val in pairs(tbl) do
+        if val.hide then
+          goto continue
+        end
+
+        local get_length = (col == "key") and key or val[col]
+
+        local length = #get_length
+        if length > max_length then
+          max_length = length
+        end
+
+        ::continue::
+      end
+      return max_length
+    end
+
+    local function pad(str, max_length, offset)
+      return str .. string.rep(" ", max_length - #str + (offset or 0))
+    end
+
+    -- Workout the column spacing
+    local keymaps = config.strategies.chat.keymaps
+    local keymaps_max = max("description", keymaps)
+
+    local vars = config.strategies.chat.variables
+    local vars_max = max("key", vars)
+
+    local tools = config.strategies.agent.tools
+    local tools_max = max("key", tools)
+
+    local max_length = math.max(keymaps_max, vars_max, tools_max)
+
+    -- Keymaps
+    table.insert(lines, "### Keymaps")
+
+    for _, map in pairs(keymaps) do
+      if not map.hide then
+        local modes = {
+          n = "Normal",
+          i = "Insert",
+        }
+
+        local output = {}
+        for mode, key in pairs(map.modes) do
+          if type(key) == "table" then
+            local keys = {}
+            for _, v in ipairs(key) do
+              table.insert(keys, "`" .. v .. "`")
+            end
+            key = table.concat(key, "|")
+            table.insert(output, "`" .. key .. "` in " .. modes[mode] .. " mode")
+          else
+            table.insert(output, "`" .. key .. "` in " .. modes[mode] .. " mode")
+          end
+        end
+        local output_str = table.concat(output, " and ")
+
+        table.insert(lines, indent .. pad("_" .. map.description .. "_", max_length, 4) .. " " .. output_str)
+      end
+    end
+
+    -- Variables
+    table.insert(lines, "")
+    table.insert(lines, "### Variables")
+
+    for key, val in pairs(vars) do
+      table.insert(lines, indent .. pad("#" .. key, max_length, 4) .. " " .. val.description)
+    end
+
+    -- Tools
+    table.insert(lines, "")
+    table.insert(lines, "### Tools")
+
+    for key, val in pairs(tools) do
+      if key ~= "opts" then
+        table.insert(lines, indent .. pad("@" .. key, max_length, 4) .. " " .. val.description)
+      end
+    end
+
+    -- Output them to a floating window
+    local window = config.display.chat.window
+    local width = window.width > 1 and window.width or 85
+    local height = window.height > 1 and window.height or 17
+
+    local bufnr = api.nvim_create_buf(false, true)
+    api.nvim_buf_set_option(bufnr, "filetype", "codecompanion")
+    local winnr = api.nvim_open_win(bufnr, true, {
+      relative = "cursor",
+      border = "single",
+      width = width,
+      height = height,
+      style = "minimal",
+      row = 10,
+      col = 0,
+      title = "Help",
+      title_pos = "center",
+    })
+
+    api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+
+    local function close()
+      api.nvim_buf_delete(bufnr, { force = true })
+    end
+
+    -- Set keymaps to close the float
+    vim.keymap.set("n", "q", close, { buffer = bufnr })
+    vim.keymap.set("n", "<ESC>", close, { buffer = bufnr })
+  end,
+}
+
+M.send = {
   callback = function()
     vim.cmd("w")
   end,
 }
 
 M.close = {
-  desc = "Close the chat window",
   callback = function(chat)
     chat:close()
   end,
 }
 
 M.stop = {
-  desc = "Stop the current request",
   callback = function(chat)
-    if chat.current_job then
+    if chat.current_request then
       chat:stop()
     end
+  end,
+}
+
+M.clear = {
+  callback = function(chat)
+    chat:clear()
   end,
 }
 
 M.save_chat = {
   desc = "Save the current chat",
   callback = function(chat)
-    local saved_chat = require("codecompanion.strategies.saved_chats").new({})
+    local saved_chat = require("codecompanion.strategies.saved_chats")
 
     if chat.saved_chat then
-      saved_chat.filename = chat.saved_chat
-      saved_chat:save(chat.bufnr, chat:get_messages())
+      chat:save_chat()
 
-      if config.silence_notifications then
+      if config.opts.silence_notifications then
         return
       end
 
@@ -46,40 +179,30 @@ M.save_chat = {
       if not filename then
         return
       end
-      saved_chat.filename = filename
-      saved_chat:save(chat.bufnr, chat:get_messages())
+      saved_chat = saved_chat.new({ filename = filename })
+      saved_chat:save(chat)
       chat.saved_chat = filename
     end)
   end,
 }
 
-M.clear = {
-  desc = "Clear the current chat",
-  callback = function(args)
-    local ns_id = vim.api.nvim_create_namespace("CodeCompanionTokens")
-    vim.api.nvim_buf_clear_namespace(args.bufnr, ns_id, 0, -1)
-
-    vim.api.nvim_buf_set_lines(args.bufnr, 0, -1, false, {})
-  end,
-}
-
 M.codeblock = {
   desc = "Insert a codeblock",
-  callback = function(args)
-    local bufnr = vim.api.nvim_get_current_buf()
-    local cursor_pos = vim.api.nvim_win_get_cursor(0)
+  callback = function(chat)
+    local bufnr = api.nvim_get_current_buf()
+    local cursor_pos = api.nvim_win_get_cursor(0)
     local line = cursor_pos[1]
 
-    args.type = args.type or ""
+    local ft = chat.context.filetype or ""
 
     local codeblock = {
-      "```" .. args.type,
+      "```" .. ft,
       "",
       "```",
     }
 
-    vim.api.nvim_buf_set_lines(bufnr, line - 1, line, false, codeblock)
-    vim.api.nvim_win_set_cursor(0, { line + 1, vim.fn.indent(line) })
+    api.nvim_buf_set_lines(bufnr, line - 1, line, false, codeblock)
+    api.nvim_win_set_cursor(0, { line + 1, vim.fn.indent(line) })
   end,
 }
 
@@ -97,77 +220,30 @@ M.previous = {
   end,
 }
 
-M.add_tool = {
-  desc = "Add a tool to the chat buffer",
-  callback = function(chat)
-    local items = {}
-    for id, tool in pairs(config.tools) do
-      if tool.enabled then
-        table.insert(items, {
-          id = id,
-          name = tool.name,
-          description = tool.description,
-          location = tool.location,
-        })
-      end
+-- INLINE MAPPINGS ------------------------------------------------------------
+
+M.accept_change = {
+  desc = "Accept the change from the LLM",
+  callback = function(inline)
+    local ns_id = vim.api.nvim_create_namespace("codecompanion_diff_removed_")
+    api.nvim_buf_clear_namespace(inline.context.bufnr, ns_id, 0, -1)
+
+    for map, _ in pairs(config.strategies.inline.keymaps) do
+      clear_map(map, inline.context.bufnr)
     end
+  end,
+}
 
-    if #items == 0 then
-      return vim.notify("[CodeCompanion.nvim]\nNo tools available", vim.log.levels.WARN)
+M.reject_change = {
+  desc = "Reject the change from the LLM",
+  callback = function(inline)
+    local ns_id = vim.api.nvim_create_namespace("codecompanion_diff_removed_")
+    api.nvim_buf_clear_namespace(inline.context.bufnr, ns_id, 0, -1)
+    vim.cmd("undo")
+
+    for map, _ in pairs(config.strategies.inline.keymaps) do
+      clear_map(map, inline.context.bufnr)
     end
-
-    table.sort(items, function(a, b)
-      return a > b
-    end)
-
-    -- Picker of available tools
-    require("codecompanion.utils.ui").selector(items, {
-      prompt = "Select a tool",
-      width = config.display.action_palette.width,
-      height = config.display.action_palette.height,
-      format = function(item)
-        return {
-          item.name,
-          "tools",
-          item.description,
-        }
-      end,
-      callback = function(item)
-        local location = item.location or "codecompanion.tools"
-        local tool = require(location .. "." .. item.id)
-
-        -- Parse the buffer to determine where to insert the prompt
-        local insert_at = 0
-        if config.display.chat.show_settings then
-          local yaml_query = [[(block_mapping_pair key: (_) @key)]]
-          local parser = vim.treesitter.get_parser(chat.bufnr, "yaml")
-          local query = vim.treesitter.query.parse("yaml", yaml_query)
-          local root = parser:parse()[1]:root()
-
-          local captures = {}
-          for k, v in pairs(query.captures) do
-            captures[v] = k
-          end
-
-          local settings = {}
-          for _, match in query:iter_matches(root, chat.bufnr) do
-            local key = vim.treesitter.get_node_text(match[captures.key], chat.bufnr)
-            table.insert(settings, key)
-          end
-
-          insert_at = #settings + 2
-        end
-
-        chat:add_message({
-          role = "system",
-          content = tool.prompt(tool.schema),
-        }, {
-          insert_at = insert_at,
-          force_role = true,
-          notify = "The Code Runner tool was added to the chat buffer",
-        })
-      end,
-    })
   end,
 }
 

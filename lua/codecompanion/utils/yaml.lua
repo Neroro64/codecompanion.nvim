@@ -50,28 +50,23 @@ end
 local function decode(source, node)
   local nt = node:type()
   if nt == "stream" or nt == "document" or nt == "block_node" or nt == "flow_node" or nt == "plain_scalar" then
-    if node:child_count() > 1 then
-      error(string.format("Node %s has more than 1 child", nt))
+    for child in node:iter_children() do
+      if child:named() then
+        return decode(source, child)
+      end
     end
-    return decode(source, node:child(0))
-  elseif nt == "block_sequence_item" then
-    if node:child_count() ~= 2 then
-      error("block_sequence_item should have exactly 2 children")
-    end
-    -- First child is anonymous "-"
-    return decode(source, node:child(1))
   elseif nt == "block_mapping" then
-    local ret = {}
+    local result = {}
     for child in node:iter_children() do
       assert(child:type() == "block_mapping_pair")
       local key = decode(source, child:named_child(0))
       if not key then
         error("Could not decode map key")
       end
-      ret[key] = decode(source, child:named_child(1))
+      result[key] = decode(source, child:named_child(1))
     end
     -- Provide a way to get the TSNode for a map
-    return setmetatable(ret, {
+    return setmetatable(result, {
       __index = {
         __ts_node = node,
       },

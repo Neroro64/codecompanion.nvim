@@ -1,5 +1,6 @@
 local config = require("codecompanion").config
 local log = require("codecompanion.utils.log")
+local api = vim.api
 
 ---@class CodeCompanion.Workflow
 local Workflow = {}
@@ -25,7 +26,7 @@ function Workflow:workflow(prompts)
     if prompt.start then
       if
         (type(prompt.condition) == "function" and not prompt.condition())
-        or (prompt.contains_code and not config.send_code)
+        or (prompt.contains_code and not config.opts.send_code)
       then
         goto continue
       end
@@ -64,18 +65,17 @@ function Workflow:workflow(prompts)
   local chat = require("codecompanion.strategies.chat").new({
     type = "chat",
     messages = starting_prompts,
-    show_buffer = true,
   })
 
   if not chat then
     return
   end
 
-  local group = vim.api.nvim_create_augroup("CodeCompanionWorkflow", {
+  local group = api.nvim_create_augroup("CodeCompanionWorkflow", {
     clear = false,
   })
 
-  vim.api.nvim_create_autocmd("User", {
+  api.nvim_create_autocmd("User", {
     desc = "Listen for CodeCompanion agent messages",
     group = group,
     pattern = "CodeCompanionChat",
@@ -87,7 +87,7 @@ function Workflow:workflow(prompts)
       send_prompt(chat)
 
       if #workflow_prompts == 0 then
-        vim.api.nvim_del_augroup_by_id(group)
+        api.nvim_del_augroup_by_id(group)
       end
     end,
   })

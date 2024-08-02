@@ -33,7 +33,7 @@ describe("Client", function()
     Client = require("codecompanion.client") -- Now that setup has been called, we can require the client
   end)
 
-  it("stream_call should work with mocked dependencies", function()
+  it("can call API endpoints", function()
     local mock_handler = {
       after = stub.new().returns(nil),
       args = "mocked args",
@@ -53,7 +53,7 @@ describe("Client", function()
 
     local cb = stub.new()
 
-    adapter = require("codecompanion.adapter").new(adapter)
+    adapter = require("codecompanion.adapters").new(adapter)
 
     Client.new():stream(adapter, {}, 0, cb)
 

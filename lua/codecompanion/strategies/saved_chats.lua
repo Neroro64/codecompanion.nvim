@@ -1,9 +1,17 @@
 local Chat = require("codecompanion.strategies.chat")
 local config = require("codecompanion").config
+
+local context = require("codecompanion.utils.context")
 local log = require("codecompanion.utils.log")
 
-local prefix = config.saved_chats.save_dir .. "/"
+local api = vim.api
+local prefix = config.opts.saved_chats_dir .. "/"
 local suffix = ".json"
+
+local CONSTANTS = {
+  [config.strategies.chat.roles.llm:lower()] = "llm",
+  [config.strategies.chat.roles.user:lower()] = "user",
+}
 
 local function get_current_datetime()
   return os.date("%Y-%m-%d_%H:%M:%S")
@@ -12,7 +20,7 @@ end
 ---@param bufnr number
 ---@param name string
 local function rename_buffer(bufnr, name)
-  vim.api.nvim_buf_set_name(bufnr, "[CodeCompanion Chat] " .. name .. ".md")
+  api.nvim_buf_set_name(bufnr, "[CodeCompanion Chat] " .. name .. ".md")
 end
 
 ---@class CodeCompanion.SavedChat
@@ -22,7 +30,7 @@ local SavedChat = {}
 
 ---@class CodeCompanion.SessionArgs
 ---@field filename nil|string The saved_chat name
----@field cwd string The current working directory of the editor
+---@field cwd? string The current working directory of the editor
 
 ---@param args CodeCompanion.SessionArgs
 ---@return CodeCompanion.SavedChat
@@ -39,8 +47,8 @@ end
 
 ---@param filename string
 ---@param bufnr number
----@param saved_chat table
-local function save(filename, bufnr, saved_chat)
+---@param chat_content table
+local function save(filename, bufnr, chat_content)
   local path = prefix .. filename .. suffix
 
   local match = path:match("(.*/)")
@@ -51,9 +59,9 @@ local function save(filename, bufnr, saved_chat)
   local file, err = io.open(path, "w")
   if file ~= nil then
     log:debug('Saved Chat: "%s.json" saved', filename)
-    file:write(vim.json.encode(saved_chat))
+    file:write(vim.json.encode(chat_content))
     file:close()
-    vim.api.nvim_exec_autocmds("User", { pattern = "CodeCompanionChatSaved", data = { status = "finished" } })
+    api.nvim_exec_autocmds("User", { pattern = "CodeCompanionChatSaved", data = { status = "finished" } })
   else
     log:debug("Saved chat could not be saved. Error: %s", err)
     vim.notify("[CodeCompanion.nvim]\nCannot save chat: " .. err, vim.log.levels.ERROR)
@@ -62,28 +70,34 @@ local function save(filename, bufnr, saved_chat)
   rename_buffer(bufnr, filename)
 end
 
----@param bufnr number
----@param messages table
-function SavedChat:save(bufnr, settings, messages)
-  local tokens = require("codecompanion.utils.tokens")
+---@param chat CodeCompanion.Chat
+function SavedChat:save(chat)
   local files = require("codecompanion.utils.files")
 
-  local saved_chat = {
+  local chat_content = {
     meta = {
       dir = files.replace_home(self.cwd),
-      tokens = tokens.get_tokens(messages),
+      tokens = chat.tokens or 0,
       updated_at = get_current_datetime(),
     },
-    settings = settings,
-    messages = messages,
+    adapter = chat.adapter.args.name,
+    messages = chat:get_messages(),
+    hidden_msgs = chat.hidden_msgs,
   }
+
+  -- Replace the roles with the user's headers
+  for _, message in ipairs(chat_content.messages) do
+    if message.role then
+      message.role = CONSTANTS[message.role:lower()] or message.role
+    end
+  end
 
   if not self.filename then
     log:debug("Saved Chat: No filename provided, skipping save")
     return
   end
 
-  return save(self.filename, bufnr, saved_chat)
+  return save(self.filename, chat.bufnr, chat_content)
 end
 
 ---@param opts nil|table
@@ -123,14 +137,33 @@ function SavedChat:load(opts)
   self.filename = opts.filename
   local content = vim.fn.json_decode(table.concat(vim.fn.readfile(opts.path), "\n"))
 
-  local chat_buf = Chat.new({
+  -- Check the adapter exists
+  if not config.adapters[content.adapter] then
+    log:error("[CodeCompanion.nvim] Adapter %s does not exist. Using the default instead.", content.adapter)
+    content.adapter = config.adapters[config.strategies.chat.adapter]
+  end
+
+  -- Replace the roles as per the config
+  for _, message in ipairs(content.messages) do
+    if message.role then
+      message.role = config.strategies.chat.roles[message.role] or message.role
+    end
+  end
+
+  local chat = Chat.new({
     saved_chat = self.filename,
     messages = content.messages,
-    settings = content.settings,
-    show_buffer = true,
+    hidden_msgs = content.hidden_msgs,
+    adapter = config.adapters[content.adapter],
+    context = context.get_context(api.nvim_get_current_buf()),
+    tokens = content.meta.tokens,
   })
 
-  rename_buffer(chat_buf.bufnr, opts.filename)
+  if not chat then
+    return log:error("Could not load chat")
+  end
+
+  rename_buffer(chat.bufnr, opts.filename)
 end
 
 function SavedChat:has_chats()
